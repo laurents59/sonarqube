@@ -19,10 +19,11 @@
  */
 package org.sonar.process;
 
-import org.apache.commons.io.FileUtils;
+import net.openhft.chronicle.map.ChronicleMapBuilder;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * Process inter-communication to :
@@ -42,75 +43,61 @@ import java.io.IOException;
  */
 public class ProcessCommands {
 
-  private final File readyFile, stopFile;
+  private final File sharedFile;
+  private String processKey;
+  private final ConcurrentMap<String, Long> communicationMap;
+  private final static ChronicleMapBuilder<String, Long> BUILDER = ChronicleMapBuilder.of(String.class, Long.class);
 
   public ProcessCommands(File directory, String processKey) {
+    this.processKey = processKey;
     if (!directory.isDirectory() || !directory.exists()) {
       throw new IllegalArgumentException("Not a valid directory: " + directory);
     }
-    this.readyFile = new File(directory, processKey + ".ready");
-    this.stopFile = new File(directory, processKey + ".stop");
+    this.sharedFile = new File(directory, "sharedmemory");
+    try {
+      communicationMap = BUILDER.createPersistedTo(sharedFile);
+    } catch (IOException e) {
+      throw new IllegalStateException(String.format("Fail to create file %s", sharedFile), e);
+    }
   }
 
   // visible for tests
-  ProcessCommands(File readyFile, File stopFile) {
-    this.readyFile = readyFile;
-    this.stopFile = stopFile;
+  ProcessCommands(File sharedFile) {
+    this.sharedFile = sharedFile;
+    try {
+      communicationMap = BUILDER.createPersistedTo(sharedFile);
+    } catch (IOException e) {
+      throw new IllegalStateException(String.format("Fail to create file %s", sharedFile), e);
+    }
   }
 
   public void prepare() {
-    deleteFile(readyFile);
-    deleteFile(stopFile);
   }
 
   public void endWatch() {
-    // do not fail if files can't be deleted
-    FileUtils.deleteQuietly(readyFile);
-    FileUtils.deleteQuietly(stopFile);
   }
 
   public boolean isReady() {
-    return readyFile.exists();
+    Long result = communicationMap.get(processKey + ".ready");
+    return (result != null) && (result == 1L);
   }
 
   /**
    * To be executed by child process to declare that it's ready
    */
   public void setReady() {
-    createFile(readyFile);
+    communicationMap.put(processKey + ".ready", 1L);
   }
 
   /**
    * To be executed by monitor process to ask for child process termination
    */
   public void askForStop() {
-    createFile(stopFile);
+    communicationMap.put(processKey + ".stop", 1L);
   }
 
   public boolean askedForStop() {
-    return stopFile.exists();
-  }
-
-  File getReadyFile() {
-    return readyFile;
-  }
-
-  File getStopFile() {
-    return stopFile;
-  }
-
-  private void createFile(File file) {
-    try {
-      FileUtils.touch(file);
-    } catch (IOException e) {
-      throw new IllegalStateException(String.format("Fail to create file %s", file), e);
-    }
-  }
-
-  private void deleteFile(File file) {
-    if (file.exists() && !file.delete()) {
-      throw new MessageException(String.format(
-        "Fail to delete file %s. Please check that no SonarQube process is alive", file));
-    }
+    Long result = communicationMap.get(processKey + ".stop");
+    return (result != null) && (result == 1L);
   }
 }
